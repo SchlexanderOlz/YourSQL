@@ -2,6 +2,7 @@ const std = @import("std");
 const SelectManger = @import("select_manager.zig").SelectManager;
 const String = @import("../string/string.zig").String;
 const ArrayList = std.ArrayList;
+const TableIterator = @import("./table_iterator.zig").TableIterator;
 
 const SearchError = error{NotFound};
 const DataBaseError = error{ToLongId};
@@ -17,26 +18,26 @@ pub const DataManager = struct {
         return DataManager{ .allocator = allocator, .connection = connection };
     }
 
-    pub fn deinit(this: *const DataManager) void {
-        _ = this;
+    pub fn deinit(self: *const DataManager) void {
+        _ = self;
         return;
     }
 
-    pub fn select(this: *const DataManager, columns: [][]u8, table: []u8, equals: [][]u8) SelectManger {
-        // myColumn, yourColumn FROM tableName WHERE myColumn = "10" AND yourColumn = 5
-        _ = equals;
+    pub fn select(self: *const DataManager, columns: [][]u8, table: []u8, equals: [][]u8) SelectManger {
         _ = table;
+        _ = equals;
+        // myColumn, yourColumn FROM tableName WHERE myColumn = "10" AND yourColumn = 5
 
         for (columns) |element| {
-            const idx = this.getMetaColumnIndex(element);
+            const idx = self.getMetaColumnIndex(element);
             _ = idx;
         }
 
-        return SelectManger.init(this.allocator);
+        return SelectManger.init(self.allocator);
     }
 
-    pub fn createTable(this: *DataManager, name: []const u8, fields: []const []const u8, typeIds: []const u8) !void {
-        defer this.connection.seekTo(0) catch |err| {
+    pub fn createTable(self: *DataManager, name: []const u8, fields: []const []const u8, typeIds: []const u8) !void {
+        defer self.connection.seekTo(0) catch |err| {
             errdefer err;
         };
 
@@ -45,11 +46,11 @@ pub const DataManager = struct {
         }
         var buff: [512]u8 = undefined;
         @memset(&buff, 0);
-        const bytesRead = try this.connection.read(&buff);
+        const bytesRead = try self.connection.read(&buff);
 
         if (bytesRead == 0) {
-            const tableInfo = try this.createTableMeta(name, fields, typeIds);
-            _ = try this.connection.write(tableInfo);
+            const tableInfo = try self.createTableMeta(name, fields, typeIds);
+            _ = try self.connection.write(tableInfo);
             return;
         }
 
@@ -58,15 +59,15 @@ pub const DataManager = struct {
             if (buff[i] != 0) {
                 continue;
             }
-            const tableInfo = try this.createTableMeta(name, fields, typeIds);
-            try this.connection.seekTo(i - 1);
-            _ = try this.connection.write(tableInfo);
+            const tableInfo = try self.createTableMeta(name, fields, typeIds);
+            try self.connection.seekTo(i - 1);
+            _ = try self.connection.write(tableInfo);
             break;
         }
     }
 
-    fn createTableMeta(this: *const DataManager, name: []const u8, fields: []const []const u8, typeIds: []const u8) ![]u8 {
-        var tableInfo = ArrayList(u8).init(this.allocator);
+    fn createTableMeta(self: *const DataManager, name: []const u8, fields: []const []const u8, typeIds: []const u8) ![]u8 {
+        var tableInfo = ArrayList(u8).init(self.allocator);
         defer tableInfo.deinit();
 
         const totalSizeIdx = 0;
@@ -87,13 +88,17 @@ pub const DataManager = struct {
         return slice;
     }
 
+    pub fn getCursorPosition(self: *const DataManager) !usize {
+        return try self.connection.getPos();
+    }
+
     // Moves the cursor to the beginning, including the complete length, on pos 0,
     // of the requested table
-    pub fn moveCursorToTable(this: *DataManager, tableName: []const u8) !void {
+    pub fn moveCursorToTable(self: *DataManager, tableName: []const u8) !void {
         var buff: [1024]u8 = undefined;
         @memset(&buff, 0);
 
-        var bytesRead: usize = try this.connection.read(&buff);
+        var bytesRead: usize = try self.connection.read(&buff);
 
         var i: usize = 0;
         while (i < bytesRead) {
@@ -102,7 +107,7 @@ pub const DataManager = struct {
             }
 
             if (std.mem.eql(u8, buff[i + StringOffset .. i + StringOffset + tableName.len], tableName)) {
-                try this.connection.seekTo(i);
+                try self.connection.seekTo(i);
                 return;
             }
             i += buff[i];
@@ -110,19 +115,24 @@ pub const DataManager = struct {
         return SearchError.NotFound;
     }
 
-    // Moves the cursor further to the requested column. Assumes that
-    // the cursor is at the position of the table
-    pub fn moveCursorToColumn(this: *DataManager, columnName: []const u8) !void {
+    // TODO: This currently only is applicable for u8 sizes and not usize
+    pub fn getCurrentPosSize(self: *DataManager) !u8 {
         var buff: [1]u8 = undefined;
         @memset(&buff, 0);
-        _ = try this.connection.read(&buff);
-        const oldPos = try this.connection.getPos();
+        _ = try self.connection.read(&buff);
+        return buff[0];
+    }
 
-        var metaTable: []u8 = try this.allocator.alloc(u8, buff[0]);
+    // Moves the cursor further to the requested column. Assumes that
+    // the cursor is at the position of the table
+    pub fn moveCursorToColumn(self: *DataManager, columnName: []const u8) !void {
+        const tableSize = try self.getCurrentPosSize();
+        const oldPos = try self.connection.getPos();
+
+        var metaTable: []u8 = try self.allocator.alloc(u8, tableSize);
         @memset(metaTable, 0);
-        const bytesRead = try this.connection.read(metaTable);
-        std.debug.assert(bytesRead == buff[0]);
-        try this.connection.seekTo(oldPos);
+        const bytesRead = try self.connection.read(metaTable);
+        try self.connection.seekTo(oldPos);
 
         var i: usize = @intCast(metaTable[0] + 1);
         while (i < bytesRead) {
@@ -132,10 +142,67 @@ pub const DataManager = struct {
             }
 
             if (std.mem.eql(u8, metaTable[i + StringOffset .. i + StringOffset + columnName.len], columnName)) {
-                try this.connection.seekBy(@intCast(i));
+                try self.connection.seekBy(@intCast(i));
                 return;
             }
         }
         return SearchError.NotFound;
     }
+
+    pub fn getIndexesOfTableColumns(self: *DataManager, tableName: []const u8, columns: []const []const u8) ![]usize {
+        const oldPos = try self.connection.getPos();
+        defer self.connection.seekTo(oldPos) catch |err| {
+            errdefer err;
+        };
+
+        try self.moveCursorToTable(tableName);
+        var buff: [1024]u8 = undefined;
+        @memset(&buff, 0);
+        const bytesRead = try self.connection.read(&buff);
+        var tableIterator = TableIterator.from_slice(buff[0..bytesRead]);
+
+        var indexes = try ArrayList(usize).initCapacity(self.allocator, columns.len);
+        for (columns) |column| {
+            var i: usize = 0;
+            while (tableIterator.next()) |metaColumn| {
+                std.debug.print("{s}\n", .{metaColumn[0..]});
+                defer i += 1;
+                if (metaColumn[LengthOffset] != column.len) {
+                    continue;
+                }
+                if (std.mem.eql(u8, metaColumn[StringOffset..], column)) {
+                    try indexes.append(i);
+                    break;
+                }
+            }
+            tableIterator.reset();
+        }
+        return try indexes.toOwnedSlice();
+    }
 };
+
+// ---Tests-Start---
+
+test "MoveToCreatedTest" {
+    const name = "myTable";
+    const fields = .{ "myField", "myColumn" };
+    const types = .{ 1, 3 };
+
+    const otherName = "otherTable";
+    const otherFields = .{ "otherMyField", "otherMyColumn" };
+    const otherTypes = .{ 60, 5 };
+
+    var file: std.fs.File = try std.fs.cwd().createFile("test.zb", .{ .read = true });
+    var dataManager = DataManager.init(std.heap.page_allocator, &file);
+
+    try dataManager.createTable(name, &fields, &types);
+    try dataManager.createTable(otherName, &otherFields, &otherTypes);
+
+    try dataManager.moveCursorToTable(otherName);
+    var buff: [512]u8 = undefined;
+    @memset(&buff, 0);
+
+    _ = try dataManager.connection.read(&buff);
+    try std.testing.expect(buff[LengthOffset] == otherName.len);
+    try std.testing.expect(std.mem.eql(u8, buff[StringOffset .. StringOffset + otherName.len], otherName));
+}
