@@ -11,7 +11,7 @@ pub fn main() !void {
     const otherTypes = .{ 60, 5 };
 
     var file: std.fs.File = try std.fs.cwd().createFile("test.zb", .{ .read = true });
-    var dataManager = DataManager.init(std.heap.page_allocator, &file);
+    var dataManager = DataManager.init(std.heap.page_allocator, file);
 
     try dataManager.createTable(name, &fields, &types);
     try dataManager.createTable(otherName, &otherFields, &otherTypes);

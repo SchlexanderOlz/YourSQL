@@ -4,7 +4,8 @@ const String = @import("../string/string.zig").String;
 const ArrayList = std.ArrayList;
 const TableIterator = @import("./table_iterator.zig").TableIterator;
 
-const SearchError = error{NotFound};
+const SearchError = error{ NotFound, MetaEndNotFound };
+const MetaEndNotFoundError = error{MetaEndNotFound};
 const DataBaseError = error{ToLongId};
 
 const LengthOffset: comptime_int = 1;
@@ -12,14 +13,14 @@ const StringOffset: comptime_int = 2;
 
 pub const DataManager = struct {
     allocator: std.mem.Allocator,
-    connection: *std.fs.File,
+    connection: std.fs.File,
 
-    pub fn init(allocator: std.mem.Allocator, connection: *std.fs.File) DataManager {
+    pub fn init(allocator: std.mem.Allocator, connection: std.fs.File) DataManager {
         return DataManager{ .allocator = allocator, .connection = connection };
     }
 
-    pub fn deinit(self: *const DataManager) void {
-        _ = self;
+    pub fn deinit(self: DataManager) void {
+        self.connection.close();
         return;
     }
 
@@ -42,10 +43,51 @@ pub const DataManager = struct {
 
     pub fn moveCursorToEndOfMeta(self: *DataManager) !void {
         try self.connection.seekTo(0);
-        const size = try self.getCurrentPosSize();
-        try self.connection.seekTo(size);
+
+        var buff: []u8 = try self.readCurrentToBuff(1024);
+        var bytesRead = buff.len;
+        if (bytesRead == 0) return;
+        var globalSize: usize = 0;
+        while (bytesRead != 0) {
+            var i: usize = 0;
+            while (i < bytesRead) {
+                // In case of the last table the 0 byte would be at position 1
+                if (buff[i + 1] == 0) {
+                    try self.connection.seekTo(i + globalSize);
+                    return;
+                }
+                const nextSize = buff[i];
+
+                i += nextSize;
+            }
+            // If gone through the entire buffer the next 1024 bytes are read
+            buff = try self.readCurrentToBuff(1024);
+            bytesRead = buff.len;
+            globalSize += i;
+        }
+        try self.connection.seekTo(0);
+        return SearchError.MetaEndNotFound;
     }
 
+    /// Reads the next *size* bytes from the file and returns them.
+    fn readCurrentToBuff(self: *const DataManager, comptime size: usize) ![]u8 {
+        var buff: [size]u8 = undefined;
+        @memset(&buff, 0);
+        const bytesRead = try self.connection.read(&buff);
+        return buff[0..bytesRead];
+    }
+
+    /// Reads the next *size* bytes from the file and returns them. The cursor stays
+    /// at the same positon.
+    fn readCurrentStaticToBuff(self: *const DataManager, comptime size: usize) ![]u8 {
+        const oldPos = self.connection.getPos();
+        const data = self.readCurrentToBuff(size);
+        self.connection.seekTo(oldPos);
+        return data;
+    }
+
+    /// Creates a new table in the database.
+    /// Moves the cursor to position 0
     pub fn createTable(self: *DataManager, name: []const u8, fields: []const []const u8, typeIds: []const u8) !void {
         defer self.connection.seekTo(0) catch |err| {
             errdefer err;
@@ -54,11 +96,9 @@ pub const DataManager = struct {
         if (name.len > 255) {
             return DataBaseError.ToLongId;
         }
-        var buff: [512]u8 = undefined;
-        @memset(&buff, 0);
-        const bytesRead = try self.connection.read(&buff);
+        var buff: []u8 = try self.readCurrentToBuff(512);
 
-        if (bytesRead == 0) {
+        if (buff.len == 0) {
             const tableInfo = try self.createTableMeta(name, fields, typeIds);
             _ = try self.connection.write(tableInfo);
             return;
@@ -105,13 +145,10 @@ pub const DataManager = struct {
     // Moves the cursor to the beginning, including the complete length, on pos 0,
     // of the requested table
     fn moveCursorToTable(self: *DataManager, tableName: []const u8) !void {
-        var buff: [1024]u8 = undefined;
-        @memset(&buff, 0);
-
-        var bytesRead: usize = try self.connection.read(&buff);
+        var buff: []u8 = try self.readCurrentToBuff(1024);
 
         var i: usize = 0;
-        while (i < bytesRead) {
+        while (i < buff.len) {
             if (buff[i + LengthOffset] != tableName.len) {
                 i += buff[i];
             }
@@ -126,25 +163,19 @@ pub const DataManager = struct {
     }
 
     // TODO: This currently only is applicable for u8 sizes and not usize
-    pub fn getCurrentPosSize(self: *DataManager) !u8 {
-        const originalPos = try self.connection.getPos();
-        defer self.connection.seekTo(originalPos) catch |err| {
-            errdefer err;
-        };
-
-        var buff: [1]u8 = undefined;
-        @memset(&buff, 0);
-        _ = try self.connection.read(&buff);
-        return buff[0];
+    // Return the value of the current cursor-position
+    pub fn getCurrentPosValue(self: *DataManager) !u8 {
+        return try self.readCurrentStaticToBuff(1)[0];
     }
 
     // Moves the cursor further to the requested column. Assumes that
     // the cursor is at the position of the table
     fn moveCursorToColumn(self: *DataManager, columnName: []const u8) !void {
-        const tableSize = try self.getCurrentPosSize();
+        const tableSize = try self.getCurrentPosValue();
         const oldPos = try self.connection.getPos();
 
         var metaTable: []u8 = try self.allocator.alloc(u8, tableSize);
+        defer self.allocator.free(metaTable);
         @memset(metaTable, 0);
         const bytesRead = try self.connection.read(metaTable);
         try self.connection.seekTo(oldPos);
@@ -164,6 +195,7 @@ pub const DataManager = struct {
         return SearchError.NotFound;
     }
 
+    // Returns the index in the file from the columns, in the same order as the requested columns
     pub fn getIndexesOfTableColumns(self: *DataManager, tableName: []const u8, columns: []const []const u8) ![]usize {
         const oldPos = try self.connection.getPos();
         defer self.connection.seekTo(oldPos) catch |err| {
@@ -208,6 +240,7 @@ test "MoveToCreatedTest" {
 
     var file: std.fs.File = try std.fs.cwd().createFile("test.zb", .{ .read = true });
     var dataManager = DataManager.init(std.heap.page_allocator, &file);
+    defer dataManager.deinit();
 
     try dataManager.createTable(name, &fields, &types);
     try dataManager.createTable(otherName, &otherFields, &otherTypes);
