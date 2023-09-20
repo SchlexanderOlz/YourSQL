@@ -10,7 +10,7 @@ pub const TableIterator = struct {
     pub fn next(self: *TableIterator) ?[]u8 {
         const currentLen = self.data[self.index + 1];
         const nextBegin = self.index + currentLen + 2;
-        if (nextBegin + 1 >= self.data.len) {
+        if (nextBegin >= self.data.len) {
             return null;
         }
 

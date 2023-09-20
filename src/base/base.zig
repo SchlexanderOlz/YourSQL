@@ -23,17 +23,27 @@ pub const DataManager = struct {
         return;
     }
 
-    pub fn select(self: *const DataManager, columns: [][]u8, table: []u8, equals: [][]u8) SelectManger {
-        _ = table;
+    pub fn select(self: *DataManager, table: []const u8, columns: []const []const u8, equals: []const []const u8) !SelectManger {
         _ = equals;
         // myColumn, yourColumn FROM tableName WHERE myColumn = "10" AND yourColumn = 5
 
-        for (columns) |element| {
-            const idx = self.getMetaColumnIndex(element);
-            _ = idx;
-        }
+        const columnIndeces = try self.getIndexesOfTableColumns(table, columns);
+        _ = columnIndeces;
 
+        try self.moveCursorToEndOfMeta();
+        var buff: [1024]u8 = undefined;
+        @memset(&buff, 0);
+        const bytesRead = try self.connection.read(&buff);
+        std.debug.print("{s}", .{buff[0..bytesRead]});
+
+        unreachable();
         return SelectManger.init(self.allocator);
+    }
+
+    pub fn moveCursorToEndOfMeta(self: *DataManager) !void {
+        try self.connection.seekTo(0);
+        const size = try self.getCurrentPosSize();
+        try self.connection.seekTo(size);
     }
 
     pub fn createTable(self: *DataManager, name: []const u8, fields: []const []const u8, typeIds: []const u8) !void {
@@ -94,7 +104,7 @@ pub const DataManager = struct {
 
     // Moves the cursor to the beginning, including the complete length, on pos 0,
     // of the requested table
-    pub fn moveCursorToTable(self: *DataManager, tableName: []const u8) !void {
+    fn moveCursorToTable(self: *DataManager, tableName: []const u8) !void {
         var buff: [1024]u8 = undefined;
         @memset(&buff, 0);
 
@@ -117,6 +127,11 @@ pub const DataManager = struct {
 
     // TODO: This currently only is applicable for u8 sizes and not usize
     pub fn getCurrentPosSize(self: *DataManager) !u8 {
+        const originalPos = try self.connection.getPos();
+        defer self.connection.seekTo(originalPos) catch |err| {
+            errdefer err;
+        };
+
         var buff: [1]u8 = undefined;
         @memset(&buff, 0);
         _ = try self.connection.read(&buff);
@@ -125,7 +140,7 @@ pub const DataManager = struct {
 
     // Moves the cursor further to the requested column. Assumes that
     // the cursor is at the position of the table
-    pub fn moveCursorToColumn(self: *DataManager, columnName: []const u8) !void {
+    fn moveCursorToColumn(self: *DataManager, columnName: []const u8) !void {
         const tableSize = try self.getCurrentPosSize();
         const oldPos = try self.connection.getPos();
 
@@ -165,7 +180,6 @@ pub const DataManager = struct {
         for (columns) |column| {
             var i: usize = 0;
             while (tableIterator.next()) |metaColumn| {
-                std.debug.print("{s}\n", .{metaColumn[0..]});
                 defer i += 1;
                 if (metaColumn[LengthOffset] != column.len) {
                     continue;

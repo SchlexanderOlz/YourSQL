@@ -18,6 +18,8 @@ pub fn main() !void {
 
     const indeces = try dataManager.getIndexesOfTableColumns(otherName, &otherFields);
 
+    _ = try dataManager.select(name, &fields, &fields);
+
     std.debug.print("{any}", .{indeces});
 }
 
